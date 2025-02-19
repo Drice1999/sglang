@@ -295,11 +295,11 @@ class ServerArgs:
             "--tokenizer-mode",
             type=str,
             default=ServerArgs.tokenizer_mode,
-            choices=["auto", "slow"],
+            choices=["auto", "slow", "mistral"],
             help="Tokenizer mode. 'auto' will use the fast "
             "tokenizer if available, and 'slow' will "
-            "always use the slow tokenizer.",
-        )
+            "always use the slow tokenizer. \n* "
+            "'mistral' will always use the `mistral_common` tokenizer.")
         parser.add_argument(
             "--skip-tokenizer-init",
             action="store_true",
@@ -318,6 +318,7 @@ class ServerArgs:
                 "gguf",
                 "bitsandbytes",
                 "layered",
+                "mistral",
             ],
             help="The format of the model weights to load. "
             '"auto" will try to load the weights in the safetensors format '

@@ -116,7 +116,8 @@ class OutlinesGrammarBackend(BaseGrammarBackend):
 
         try:
             self.outlines_tokenizer = TransformerTokenizer(tokenizer)
-        except AttributeError:
+        except AttributeError as e:
+            print(f"An AttributeError occurred: {e}")
             # FIXME: tmp fix for chatglm2 & chatglm3 (pad_token_id=0)
             origin_pad_token_id = tokenizer.pad_token_id
 

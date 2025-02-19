@@ -20,7 +20,7 @@ import os
 import time
 import uuid
 from http import HTTPStatus
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -73,6 +73,7 @@ from sglang.srt.openai_api.protocol import (
 )
 from sglang.srt.utils import TOOLS_TAG_LIST, parse_tool_response
 from sglang.utils import get_exception_traceback
+from sglang.srt.tokenizers.mistral import MistralTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -890,35 +891,41 @@ def v1_chat_generate_request(
                     tools = [item.function.model_dump() for item in request.tools]
 
             if chat_template_name is None:
-                openai_compatible_messages = []
-                for message in request.messages:
-                    if isinstance(message.content, str):
-                        openai_compatible_messages.append(
-                            {"role": message.role, "content": message.content}
-                        )
-                    else:
-                        content_list = message.dict()["content"]
-                        for content in content_list:
-                            if content["type"] == "text":
-                                openai_compatible_messages.append(
-                                    {"role": message.role, "content": content["text"]}
-                                )
-                if openai_compatible_messages[-1]["role"] == "assistant":
-                    assistant_prefix = openai_compatible_messages[-1]["content"]
-                    openai_compatible_messages = openai_compatible_messages[:-1]
+                is_mistral_tokenizer = isinstance(tokenizer_manager.tokenizer, MistralTokenizer)
+                if (is_mistral_tokenizer):
+                    prompt_ids, image_data = apply_mistral_chat_template(request, tokenizer_manager, tools)
+                    stop = request.stop
+                    modalities = []
                 else:
-                    assistant_prefix = None
-                prompt_ids = tokenizer_manager.tokenizer.apply_chat_template(
-                    openai_compatible_messages,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    tools=tools,
-                )
-                if assistant_prefix:
-                    prompt_ids += tokenizer_manager.tokenizer.encode(assistant_prefix)
-                stop = request.stop
-                image_data = None
-                modalities = []
+                    openai_compatible_messages = []
+                    for message in request.messages:
+                        if isinstance(message.content, str):
+                            openai_compatible_messages.append(
+                                {"role": message.role, "content": message.content}
+                            )
+                        else:
+                            content_list = message.dict()["content"]
+                            for content in content_list:
+                                if content["type"] == "text":
+                                    openai_compatible_messages.append(
+                                        {"role": message.role, "content": content["text"]}
+                                    )
+                    if openai_compatible_messages[-1]["role"] == "assistant":
+                        assistant_prefix = openai_compatible_messages[-1]["content"]
+                        openai_compatible_messages = openai_compatible_messages[:-1]
+                    else:
+                        assistant_prefix = None
+                    prompt_ids = tokenizer_manager.tokenizer.apply_chat_template(
+                        openai_compatible_messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        tools=tools,
+                    )
+                    if assistant_prefix:
+                        prompt_ids += tokenizer_manager.tokenizer.encode(assistant_prefix)
+                    stop = request.stop
+                    image_data = None
+                    modalities = []
             else:
                 conv = generate_chat_conv(request, chat_template_name)
                 prompt = conv.get_prompt()
@@ -937,6 +944,9 @@ def v1_chat_generate_request(
             stop = request.stop
             image_data = None
             modalities = []
+
+        print(f"Drice: prompt_ids = {prompt_ids}, stop = {stop}, image_data = {image_data}, modalities = {modalities}")
+
         input_ids.append(prompt_ids)
         return_logprobs.append(request.logprobs)
         logprob_start_lens.append(-1)
@@ -1449,3 +1459,44 @@ def to_openai_style_logprobs(
         append_top_logprobs(output_top_logprobs)
 
     return ret_logprobs
+
+def apply_mistral_chat_template(
+    request: ChatCompletionRequest, 
+    tokenizer_manager, 
+    tools
+) -> Tuple[list[int], list[str]]:
+    image_data = []
+    mistral_compatible_messages = []
+    for message in request.messages:
+        if isinstance(message.content, str):
+            mistral_compatible_messages.append(
+                {"role": message.role, "content": message.content}
+            )
+        else:
+            content_list = []
+            for content in message.content:
+                if content.type == "text":
+                    content_list.append(
+                        {
+                            "type": content.type,
+                            "text": content.text
+                        }
+                    )
+                elif (content.type == "image_url"):
+                    content_list.append(
+                        {
+                            "type": content.type,
+                            "image_url": content.image_url.url
+                        }
+                    )
+                    image_data.append(content.image_url.url)
+            mistral_compatible_messages.append(
+                {"role": message.role, "content": content_list}
+            )
+    prompt_ids = tokenizer_manager.tokenizer.apply_chat_template(
+        mistral_compatible_messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=tools,
+    )
+    return prompt_ids, image_data

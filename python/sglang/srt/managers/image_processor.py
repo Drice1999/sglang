@@ -496,6 +496,12 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
             "image_grid_thws": image_grid_thws,
         }
 
+class MistralImageProcessor(BaseImageProcessor):
+    def __init__(self, hf_config, server_args, _processor):
+        super().__init__(hf_config, server_args, _processor)
+
+    async def process_images_async(self, *args, **kwargs):
+        return None
 
 def get_image_processor(
     hf_config, server_args: ServerArgs, processor

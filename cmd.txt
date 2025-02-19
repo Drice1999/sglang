@@ -1,0 +1,8 @@
+ssh -p 53419 root@connect.bjc1.seetacloud.com
+tI6cIEZfFqAW
+
+source /etc/network_turbo
+git pull
+pip install -e "python[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+
+outlines versions: 0.0.44
