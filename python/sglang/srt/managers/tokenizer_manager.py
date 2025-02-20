@@ -785,6 +785,9 @@ class TokenizerManager:
                     i,
                 )
 
+            if self.server_args.speculative_algorithm:
+                meta_info["spec_verify_ct"] = recv_obj.spec_verify_ct[i]
+
             if not isinstance(recv_obj, BatchEmbeddingOut):
                 meta_info.update(
                     {
@@ -792,6 +795,12 @@ class TokenizerManager:
                         "cached_tokens": recv_obj.cached_tokens[i],
                     }
                 )
+
+            if (
+                hasattr(recv_obj, "output_hidden_states")
+                and len(recv_obj.output_hidden_states[i]) > 0
+            ):
+                meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
 
             if isinstance(recv_obj, BatchStrOut):
                 out_dict = {
@@ -809,6 +818,7 @@ class TokenizerManager:
                     "embedding": recv_obj.embeddings[i],
                     "meta_info": meta_info,
                 }
+
             state.out_list.append(out_dict)
             state.finished = recv_obj.finished_reasons[i] is not None
             state.event.set()

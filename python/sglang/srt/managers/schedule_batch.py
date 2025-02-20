@@ -65,6 +65,8 @@ global_server_args_dict = {
     "enable_dp_attention": ServerArgs.enable_dp_attention,
     "enable_ep_moe": ServerArgs.enable_ep_moe,
     "device": ServerArgs.device,
+    "enable_flashinfer_mla": ServerArgs.enable_flashinfer_mla,
+    "disable_radix_cache": ServerArgs.disable_radix_cache,
 }
 
 logger = logging.getLogger(__name__)
@@ -247,12 +249,12 @@ class Req:
         # Each decode stage's output ids
         self.output_ids = []
         # fill_ids = origin_input_ids + output_ids. Updated if chunked.
+        self.fill_ids = None
         self.session_id = session_id
         self.input_embeds = input_embeds
 
         # Sampling info
         self.sampling_params = sampling_params
-        self.lora_path = lora_path
         self.custom_logit_processor = custom_logit_processor
 
         # Memory pool info
@@ -300,7 +302,7 @@ class Req:
         self.logprob_start_len = 0
         self.top_logprobs_num = top_logprobs_num
 
-        # Logprobs (return value)
+        # Logprobs (return values)
         self.input_token_logprobs_val: Optional[List[float]] = None
         self.input_token_logprobs_idx: Optional[List[int]] = None
         self.input_top_logprobs_val: Optional[List[float]] = None
@@ -315,6 +317,7 @@ class Req:
             self.output_token_logprobs_val = self.output_token_logprobs_idx = (
                 self.output_top_logprobs_val
             ) = self.output_top_logprobs_idx = None
+        self.hidden_states = []
 
         # Logprobs (internal values)
         # The tokens is prefilled but need to be considered as decode tokens
@@ -329,8 +332,14 @@ class Req:
         # Constrained decoding
         self.grammar: Optional[BaseGrammarObject] = None
 
-        # The number of cached tokens, that were already cached in the KV cache
+        # The number of cached tokens that were already cached in the KV cache
         self.cached_tokens = 0
+        self.already_computed = 0
+
+        # The number of verification forward passes in the speculative decoding.
+        # This is used to compute the average acceptance length per request.
+        self.spec_verify_ct = 0
+        self.lora_path = lora_path
 
     def extend_image_inputs(self, image_inputs):
         if self.image_inputs is None:
@@ -598,6 +607,9 @@ class ScheduleBatch:
     # Enable custom logit processor
     enable_custom_logit_processor: bool = False
 
+    # Return hidden states
+    return_hidden_states: bool = False
+
     @classmethod
     def init_new(
         cls,
@@ -609,6 +621,7 @@ class ScheduleBatch:
         enable_overlap: bool,
         spec_algorithm: SpeculativeAlgorithm,
         enable_custom_logit_processor: bool,
+        return_hidden_states: bool = False,
     ):
         return cls(
             reqs=reqs,
@@ -623,6 +636,7 @@ class ScheduleBatch:
             device=req_to_token_pool.device,
             spec_algorithm=spec_algorithm,
             enable_custom_logit_processor=enable_custom_logit_processor,
+            return_hidden_states=return_hidden_states,
         )
 
     def batch_size(self):
@@ -750,13 +764,6 @@ class ScheduleBatch:
 
         pt = 0
         for i, req in enumerate(reqs):
-            already_computed = (
-                req.extend_logprob_start_len + 1 + req.cached_tokens
-                if req.extend_logprob_start_len > 0
-                else 0
-            )
-            req.cached_tokens += len(req.prefix_indices) - already_computed
-
             req.req_pool_idx = req_pool_indices[i]
             pre_len, seq_len = len(req.prefix_indices), len(req.fill_ids)
             seq_lens.append(seq_len)
@@ -772,15 +779,20 @@ class ScheduleBatch:
                 # If req.input_embeds is already a list, append its content directly
                 input_embeds.extend(req.input_embeds)  # Use extend to avoid nesting
 
-            # Compute the relative logprob_start_len in an extend batch
-            if req.logprob_start_len >= pre_len:
-                extend_logprob_start_len = min(
-                    req.logprob_start_len - pre_len, req.extend_input_len - 1
-                )
-            else:
-                extend_logprob_start_len = req.extend_input_len - 1
+            if req.return_logprob:
+                # Compute the relative logprob_start_len in an extend batch
+                if req.logprob_start_len >= pre_len:
+                    extend_logprob_start_len = min(
+                        req.logprob_start_len - pre_len, req.extend_input_len - 1
+                    )
+                else:
+                    raise RuntimeError(
+                        f"This should never happen. {req.logprob_start_len=}, {pre_len=}"
+                    )
+                req.extend_logprob_start_len = extend_logprob_start_len
 
-            req.extend_logprob_start_len = extend_logprob_start_len
+            req.cached_tokens += pre_len - req.already_computed
+            req.already_computed = seq_len
             req.is_retracted = False
             pre_lens.append(pre_len)
 
@@ -1192,9 +1204,15 @@ class ScheduleBatch:
             spec_algorithm=self.spec_algorithm,
             spec_info=self.spec_info,
             capture_hidden_mode=(
-                getattr(self.spec_info, "capture_hidden_mode", CaptureHiddenMode.NULL)
-                if self.spec_info
-                else CaptureHiddenMode.NULL
+                CaptureHiddenMode.FULL
+                if self.return_hidden_states
+                else (
+                    getattr(
+                        self.spec_info, "capture_hidden_mode", CaptureHiddenMode.NULL
+                    )
+                    if self.spec_info
+                    else CaptureHiddenMode.NULL
+                )
             ),
         )
 
